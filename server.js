@@ -311,7 +311,8 @@ async function descargarAudioTelegram(fileId) {
   const archivoPath = meta.result.file_path;
   const mime = meta.result.mime_type || "";
   try {
-    const res = await fetch(`${API}/${archivoPath}`);
+    // La URL de descarga SIEMPRE lleva /file/bot... (sin /file da HTTP 404)
+    const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${archivoPath}`);
     if (!res.ok) return { ok: false, error: `Descarga falló: HTTP ${res.status}` };
     const buffer = new Uint8Array(await res.arrayBuffer());
     if (buffer.length === 0) return { ok: false, error: "El audio descargado está vacío." };
