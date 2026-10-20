@@ -34,6 +34,8 @@ const WEB_PASSWORD = process.env.WEB_PASSWORD || "";
 const IA_API_KEY = process.env.IA_API_KEY || "";
 const IA_MODELO = process.env.IA_MODELO || "meta-llama/llama-3.3-70b-instruct";
 const IA_URL = "https://openrouter.ai/api/v1/chat/completions";
+const STT_MODELO = process.env.IA_STT_MODELO || "openai/whisper-large-v3-turbo";
+const STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 
 const PROMPT_SISTEMA = `Eres un asistente experto en problemas técnicos agronómicos y temas académicos relacionados: agronomía, ingeniería mecánica agrícola, ciencias, tecnología, programación, servidores, agentes de IA y matemáticas.
 
@@ -142,18 +144,50 @@ async function iniciarPolling() {
           const msg = actualizacion.message;
           if (!msg) continue;
           const texto = msg.text || msg.caption || "";
+
+          // ── Nota de voz / audio: descargar + transcribir ──
+          let textoFinal = texto;
+          let esVoz = false;
+          const archivoAudio = msg.voice || msg.audio || msg.video_note;
+          if (archivoAudio?.file_id) {
+            esVoz = true;
+            // Avísale al usuario que está procesando (el "typing" dura ~5 s)
+            await llamarTelegram("sendChatAction", { chat_id: msg.chat.id, action: "record_voice" });
+            const descarga = await descargarAudioTelegram(archivoAudio.file_id);
+            if (!descarga.ok) {
+              console.warn("[stt] no se pudo descargar:", descarga.error);
+              await llamarTelegram("sendMessage", {
+                chat_id: msg.chat.id,
+                text: "No pude descargar tu nota de voz. Intenta de nuevo.",
+              });
+              continue;
+            }
+            const transcripcion = await transcribirAudio(descarga.buffer, descarga.formato);
+            if (!transcripcion.ok) {
+              console.warn("[stt] no se pudo transcribir:", transcripcion.error);
+              await llamarTelegram("sendMessage", {
+                chat_id: msg.chat.id,
+                text: "No pude entender la nota de voz. Intenta de nuevo.",
+              });
+              continue;
+            }
+            textoFinal = transcripcion.texto;
+            console.log(`[stt] 🎤 ${obtenerNombreChat(msg.chat)}: ${textoFinal}`);
+          }
+
           agregarMensaje({
             chat_id: msg.chat.id,
             chat_nombre: obtenerNombreChat(msg.chat),
             de: nombreDeContacto(msg.from),
-            texto: texto || "[mensaje sin texto]",
+            texto: esVoz ? `🎤 ${textoFinal}` : textoFinal,
             dir: "recibido",
             update_id: actualizacion.update_id,
+            tipo: esVoz ? "voz" : "texto",
           });
-          console.log(`[tel] ${obtenerNombreChat(msg.chat)}: ${texto}`);
+          console.log(`[tel] ${obtenerNombreChat(msg.chat)}: ${textoFinal}`);
 
           // Auto-respuesta con IA (salvo comandos internos)
-          if (texto && !texto.startsWith("/start")) {
+          if (textoFinal && !textoFinal.startsWith("/start")) {
             const ia = await responderConIA(msg.chat.id);
             if (ia.ok) {
               await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: ia.mensaje.texto });
@@ -161,7 +195,7 @@ async function iniciarPolling() {
             } else {
               console.warn("[ia] no se pudo responder:", ia.error);
             }
-          } else if (texto.startsWith("/start")) {
+          } else if (textoFinal.startsWith("/start")) {
             await llamarTelegram("sendMessage", {
               chat_id: msg.chat.id,
               text: `¡Hola! Soy tu asistente técnico agronómico. Puedo ayudarte con dudas sobre cultivos, plagas, fertilización, suelos, maquinaria agrícola, riego y temas relacionados con ingeniería y tecnología. También respondo preguntas académicas de ciencias, matemáticas y programación. Escríbeme tu pregunta y con gusto te ayudo.`,
@@ -249,6 +283,73 @@ async function responderConIA(chatId) {
       modelo: IA_MODELO,
     });
     return { ok: true, mensaje: enviado };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// ── 5c. Notas de voz: descargar de Telegram y transcribir con OpenRouter ─────
+// Mapa de mime_type -> formato que espera OpenRouter
+const MIME_A_FORMATO = {
+  "audio/ogg": "ogg",
+  "audio/opus": "ogg",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/mp4": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/wav": "wav",
+  "audio/webm": "webm",
+  "audio/aac": "aac",
+  "audio/flac": "flac",
+};
+
+async function descargarAudioTelegram(fileId) {
+  const meta = await llamarTelegram("getFile", { file_id: fileId });
+  if (!meta.ok || !meta.result?.file_path) {
+    return { ok: false, error: `getFile falló: ${JSON.stringify(meta).slice(0, 200)}` };
+  }
+  const archivoPath = meta.result.file_path;
+  const mime = meta.result.mime_type || "";
+  try {
+    const res = await fetch(`${API}/${archivoPath}`);
+    if (!res.ok) return { ok: false, error: `Descarga falló: HTTP ${res.status}` };
+    const buffer = new Uint8Array(await res.arrayBuffer());
+    if (buffer.length === 0) return { ok: false, error: "El audio descargado está vacío." };
+    return { ok: true, buffer, mime, formato: MIME_A_FORMATO[mime] || "ogg", duracion: meta.result.duration };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+function base64DeBytes(bytes) {
+  let binario = "";
+  for (const byte of bytes) binario += String.fromCharCode(byte);
+  return Buffer.from(binario, "binary").toString("base64");
+}
+
+async function transcribirAudio(buffer, formato) {
+  if (!IA_API_KEY) return { ok: false, error: "IA_API_KEY no configurada." };
+  try {
+    const res = await fetch(STT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${IA_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: STT_MODELO,
+        input_audio: {
+          data: base64DeBytes(buffer),
+          format: formato || "ogg",
+        },
+        language: "es",
+      }),
+    });
+    const datos = await res.json();
+    if (!res.ok) return { ok: false, error: JSON.stringify(datos).slice(0, 300) };
+    const texto = (datos.text || datos.texto || "").trim();
+    if (!texto) return { ok: false, error: "La transcripción quedó vacía." };
+    return { ok: true, texto };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
