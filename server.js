@@ -28,6 +28,7 @@ if (existsSync(RUTA_ENV)) {
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const PUERTO = Number(process.env.PORT) || 3000;
 const API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : "";
+const WEB_PASSWORD = process.env.WEB_PASSWORD || "";
 
 // ── Configuración de IA (OpenRouter: API compatible con OpenAI) ──────────────
 const IA_API_KEY = process.env.IA_API_KEY || "";
@@ -279,9 +280,34 @@ function leerCuerpo(solicitud) {
   });
 }
 
+// Autenticación básica: la web y las APIs solo responden con la contraseña correcta.
+function accesoAutorizado(solicitud) {
+  if (!WEB_PASSWORD) return true; // sin contraseña configurada, acceso abierto
+  const encabezado = solicitud.headers.authorization || "";
+  const base64 = encabezado.replace(/^Basic\s+/i, "");
+  if (!base64) return false;
+  const decodificado = Buffer.from(base64, "base64").toString("utf8");
+  const contrasena = decodificado.split(":")[1];
+  return contrasena === WEB_PASSWORD;
+}
+
+function exigirAcceso(respuesta) {
+  respuesta.writeHead(401, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "WWW-Authenticate": 'Basic realm="Puente Telegram"',
+  });
+  respuesta.end("Autenticación requerida.");
+}
+
 createServer(async (solicitud, respuesta) => {
   const url = new URL(solicitud.url, "http://localhost");
   const ruta = url.pathname;
+
+  // Proteger todo el sitio (página y APIs) con contraseña
+  if (!accesoAutorizado(solicitud)) {
+    exigirAcceso(respuesta);
+    return;
+  }
 
   // ── API ──
   if (ruta === "/api/estado") {
