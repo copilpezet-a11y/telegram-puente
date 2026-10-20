@@ -163,7 +163,7 @@ async function iniciarPolling() {
           } else if (texto.startsWith("/start")) {
             await llamarTelegram("sendMessage", {
               chat_id: msg.chat.id,
-              text: `¡Hola! Soy tu asistente para problemas técnicos agronómicos y temas académicos. Escríbeme tu duda y te respondo en máximo 3 oraciones.`,
+              text: `¡Hola! Soy tu asistente técnico agronómico. Puedo ayudarte con dudas sobre cultivos, plagas, fertilización, suelos, maquinaria agrícola, riego y temas relacionados con ingeniería y tecnología. También respondo preguntas académicas de ciencias, matemáticas y programación. Escríbeme tu pregunta y con gusto te ayudo.`,
             });
           }
         }
