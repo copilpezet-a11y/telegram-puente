@@ -14,16 +14,22 @@ const form = $("#responder");
 let mensajesActuales = [];
 
 // ── Estado del bot ──────────────────────────────────────────────────────────
+let infoIA = { configurada: false, modelo: "" };
+
 async function actualizarEstado() {
   try {
     const res = await fetch("/api/estado");
     const info = await res.json();
+    infoIA = info.ia ?? infoIA;
     elEstado.classList.remove("ok", "err");
     if (!info.tokenConfigurado) {
       elEstado.textContent = "⚠️ Falta TELEGRAM_BOT_TOKEN en .env";
       elEstado.classList.add("err");
+    } else if (!infoIA.configurada) {
+      elEstado.textContent = `Bot @${info.bot?.username ?? "?"} · sin IA configurada`;
+      elEstado.classList.add("ok");
     } else {
-      elEstado.textContent = `Bot @${info.bot?.username ?? "?"} · ${info.total} mensajes`;
+      elEstado.textContent = `Bot @${info.bot?.username ?? "?"} · IA: ${infoIA.modelo}`;
       elEstado.classList.add("ok");
     }
   } catch {
@@ -50,7 +56,8 @@ function dibujarMensajes(mensajes) {
     const hora = new Date(m.fecha).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = `${m.dir === "enviado" ? "✉️ Enviado" : "📥 " + m.de} · ${hora} · ${m.chat_nombre}`;
+    const modelo = m.modelo ? ` · 🤖 ${m.modelo.split("/").pop()}` : "";
+    meta.textContent = `${m.dir === "enviado" ? "✉️ Enviado" : "📥 " + m.de} · ${hora} · ${m.chat_nombre}${modelo}`;
     const texto = document.createElement("span");
     texto.className = "texto";
     texto.textContent = m.texto;

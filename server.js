@@ -29,6 +29,21 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const PUERTO = Number(process.env.PORT) || 3000;
 const API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : "";
 
+// ── Configuración de IA (OpenRouter: API compatible con OpenAI) ──────────────
+const IA_API_KEY = process.env.IA_API_KEY || "";
+const IA_MODELO = process.env.IA_MODELO || "meta-llama/llama-3.3-70b-instruct";
+const IA_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+const PROMPT_SISTEMA = `Eres un ingeniero agrónomo y mecánico agrícola, instructor del curso-taller "Git, servidores y agentes de IA" de la Universidad Autónoma Chapingo (curso DIMA 2026).
+
+Reglas inquebrantables:
+1. Respondes SIEMPRE en español.
+2. Respondes en MÁXIMO 3 ORACIONES.
+3. Nunca mientes ni inventas datos: si no tienes certeza de algo, dilo explícitamente ("no tengo certeza de eso") en lugar de afirmar una falsedad.
+4. Trata de tú, de forma directa y práctica, como ingeniero de campo.
+
+Contexto del proyecto del que hablas: un puente Telegram <-> web que recibe mensajes del bot y los responde con IA; el equipo se llama "Equipo 05 (Copil)".`;
+
 // ── 2. Almacén de mensajes (en memoria + respaldo en archivo JSON) ──────────
 const DIR_DATOS = fileURLToPath(new URL("./data", import.meta.url));
 const ARCHIVO_DATOS = join(DIR_DATOS, "mensajes.json");
@@ -125,12 +140,6 @@ async function iniciarPolling() {
           const msg = actualizacion.message;
           if (!msg) continue;
           const texto = msg.text || msg.caption || "";
-          if (texto.startsWith("/start")) {
-            await llamarTelegram("sendMessage", {
-              chat_id: msg.chat.id,
-              text: `¡Hola! Estás viendo el puente Telegram↔Web.\nAbre la app en tu servidor para ver y responder estos mensajes.`,
-            });
-          }
           agregarMensaje({
             chat_id: msg.chat.id,
             chat_nombre: obtenerNombreChat(msg.chat),
@@ -140,6 +149,22 @@ async function iniciarPolling() {
             update_id: actualizacion.update_id,
           });
           console.log(`[tel] ${obtenerNombreChat(msg.chat)}: ${texto}`);
+
+          // Auto-respuesta con IA (salvo comandos internos)
+          if (texto && !texto.startsWith("/start")) {
+            const ia = await responderConIA(msg.chat.id);
+            if (ia.ok) {
+              await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: ia.mensaje.texto });
+              console.log(`[ia] @${infoBot?.username ?? "bot"} → ${obtenerNombreChat(msg.chat)}: ${ia.mensaje.texto}`);
+            } else {
+              console.warn("[ia] no se pudo responder:", ia.error);
+            }
+          } else if (texto.startsWith("/start")) {
+            await llamarTelegram("sendMessage", {
+              chat_id: msg.chat.id,
+              text: `¡Hola! Soy el bot del Equipo 05 (Copil), ahora con IA. Escríbeme cualquier cosa y te respondo en máximo 3 oraciones.`,
+            });
+          }
         }
       } else {
         estadoTel = "error";
@@ -169,6 +194,62 @@ async function responder(chatId, texto) {
     return { ok: true, mensaje: enviado };
   }
   return { ok: false, error: JSON.stringify(res).slice(0, 300) };
+}
+
+// ── 5b. Respuestas con IA (OpenRouter) ────────────────────────────────────────
+// Recorta a máximo 3 oraciones como red de seguridad del prompt.
+function limitarA3Oraciones(texto) {
+  const partes = texto.match(/[^.!?]+[.!?]+/g) || [];
+  if (partes.length <= 3) return texto.trim();
+  return partes.slice(0, 3).join(" ").trim();
+}
+
+// Construye el historial reciente del chat para dar contexto a la IA.
+function historialDelChat(chatId, limite = 10) {
+  return mensajes
+    .filter((m) => m.chat_id === chatId)
+    .slice(-limite)
+    .map((m) => ({
+      role: m.dir === "enviado" ? "assistant" : "user",
+      content: m.texto,
+    }));
+}
+
+async function responderConIA(chatId) {
+  if (!IA_API_KEY) return { ok: false, error: "IA_API_KEY no configurada." };
+  const historial = historialDelChat(chatId);
+  try {
+    const res = await fetch(IA_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${IA_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: IA_MODELO,
+        messages: [{ role: "system", content: PROMPT_SISTEMA }, ...historial],
+        max_tokens: 180,
+      }),
+    });
+    const datos = await res.json();
+    if (!res.ok) {
+      return { ok: false, error: JSON.stringify(datos).slice(0, 300) };
+    }
+    const contiene = datos?.choices?.[0]?.message?.content;
+    if (!contiene) return { ok: false, error: "La IA no devolvió contenido." };
+    const texto = limitarA3Oraciones(contiene);
+    const enviado = agregarMensaje({
+      chat_id: chatId,
+      chat_nombre: `Chat ${chatId}`,
+      de: infoBot ? `@${infoBot.username}` : "Bot",
+      texto,
+      dir: "enviado",
+      modelo: IA_MODELO,
+    });
+    return { ok: true, mensaje: enviado };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 }
 
 // ── 6. Servidor HTTP: página web + API ───────────────────────────────────────
@@ -209,6 +290,10 @@ createServer(async (solicitud, respuesta) => {
       bot: infoBot ? { username: infoBot.username, nombre: infoBot.first_name } : null,
       estado: estadoTel,
       total: mensajes.length,
+      ia: {
+        configurada: Boolean(IA_API_KEY),
+        modelo: IA_MODELO,
+      },
     }));
     return;
   }

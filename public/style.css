@@ -84,6 +84,16 @@ main {
   margin: auto;
 }
 
+.nota-ia {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--mutado);
+  background: #155e75;
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+}
+
 .mensaje {
   max-width: 85%;
   padding: 0.5rem 0.85rem;
