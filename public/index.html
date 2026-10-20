@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Puente Telegram ↔ Web</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>📡 Puente Telegram</h1>
+    <p class="estado" id="estado">Conectando…</p>
+  </header>
+
+  <main>
+    <section class="mensajes" id="mensajes" aria-live="polite">
+      <p class="vacio" id="vacio">Todavía no hay mensajes.<br>Escríbele a tu bot desde Telegram 👇</p>
+    </section>
+
+    <form id="responder" class="responder" autocomplete="off">
+      <label for="chat">Responder a</label>
+      <select id="chat" name="chat" required>
+        <option value="">— elige un chat —</option>
+      </select>
+      <div class="fila">
+        <input id="texto" name="texto" type="text" placeholder="Escribe tu respuesta…" required>
+        <button type="submit">Enviar ➤</button>
+      </div>
+      <p id="aviso" class="aviso" role="status"></p>
+    </form>
+  </main>
+
+  <footer>
+    <p>Prueba de conexión · bot ↔ servidor · Curso DIMA 2026</p>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

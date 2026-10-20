@@ -1,0 +1,14 @@
+{
+  "name": "telegram-puente",
+  "version": "1.0.0",
+  "description": "Puente Telegram <-> Web: muestra los mensajes que le llegan al bot y permite responder desde el navegador.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.5.0"
+}
