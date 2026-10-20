@@ -67,6 +67,16 @@ desplegar --forzar
 
 La web queda disponible en tu link del equipo, por ejemplo `https://equipo05.179-236-73-82.sslip.io`.
 
+## Acceso a la web (protegida con contraseña)
+
+La página y las APIs están protegidas con **Basic Auth** para que nadie con el link pueda ver los mensajes.
+
+- **Usuario:** cualquiera (por ejemplo `equipo05`).
+- **Contraseña:** la definida en `WEB_PASSWORD` (en `~/app/.env` del servidor).
+- Sin credenciales, el servidor responde `401` y no muestra nada.
+
+Para cambiar la contraseña: edita `WEB_PASSWORD` en `~/app/.env` del servidor y reinicia (`desplegar --forzar` o `supervisorctl restart app`).
+
 ## Notas
 
 - El token y la key se leen al arrancar el servidor (`server.js` carga `.env` él mismo).
