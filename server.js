@@ -39,6 +39,23 @@ const STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 // Modelo de visión (imágenes): el modelo principal de chat no ve imágenes, por eso se usa uno aparte.
 const IA_VISION_MODELO = process.env.IA_VISION_MODELO || "google/gemini-2.5-flash";
 
+// ── Reportes en PDF ─────────────────────────────────────────────────────────
+// Prompt distinto para reportes: aquí la respuesta es un documento (sin límite de 3 oraciones),
+// pero conservando las reglas de honestidad y temas académicos.
+const PROMPT_REPORTE = `Eres un ingeniero agrónomo y mecánico agrícola. Redacta un reporte técnico en español sobre el tema indicado.
+
+El reporte debe tener EXACTAMENTE estas 4 secciones, cada una encabezada con su título:
+## Introducción
+## Desarrollo
+## Recomendaciones
+## Conclusión
+
+Reglas:
+- Solo temas académicos y técnicos (agronomía, ingeniería agrícola, ciencias, tecnología, programación).
+- NUNCA inventes datos ni cifras: si no tienes certeza, escríbelo explícitamente.
+- Extensión moderada: 1 párrafo breve por sección (3-5 oraciones), en total no más de ~20 oraciones.
+- Escribe solo el contenido del reporte, sin saludos ni despedidas.`;
+
 const PROMPT_SISTEMA = `Eres un asistente experto en problemas técnicos agronómicos y temas académicos relacionados: agronomía, ingeniería mecánica agrícola, ciencias, tecnología, programación, servidores, agentes de IA y matemáticas.
 
 Reglas inquebrantables:
@@ -224,19 +241,36 @@ async function iniciarPolling() {
                 text: "No pude analizar la imagen. Intenta de nuevo.",
               });
             }
-          } else if (textoFinal && !textoFinal.startsWith("/start")) {
-            const ia = await responderConIA(msg.chat.id);
-            if (ia.ok) {
-              await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: ia.mensaje.texto });
-              console.log(`[ia] @${infoBot?.username ?? "bot"} → ${obtenerNombreChat(msg.chat)}: ${ia.mensaje.texto}`);
-            } else {
-              console.warn("[ia] no se pudo responder:", ia.error);
-            }
-          } else if (textoFinal.startsWith("/start")) {
+          } else if (textoFinal && textoFinal.startsWith("/start")) {
             await llamarTelegram("sendMessage", {
               chat_id: msg.chat.id,
               text: `¡Hola! Soy tu asistente técnico agronómico. Puedo ayudarte con dudas sobre cultivos, plagas, fertilización, suelos, maquinaria agrícola, riego y temas relacionados con ingeniería y tecnología. También respondo preguntas académicas de ciencias, matemáticas y programación. Escríbeme tu pregunta y con gusto te ayudo.`,
             });
+          } else if (textoFinal) {
+            // ¿Pide un reporte en PDF? (comando /reporte o la palabra "reporte")
+            const temaReporte = obtenerTemaReporte(textoFinal);
+            if (temaReporte) {
+              await llamarTelegram("sendChatAction", { chat_id: msg.chat.id, action: "upload_document" });
+              console.log(`[reporte] 📄 ${obtenerNombreChat(msg.chat)}: "${temaReporte}"`);
+              const reporte = await enviarReportePDF(msg.chat.id, temaReporte);
+              if (reporte.ok) {
+                console.log(`[reporte] PDF enviado a ${obtenerNombreChat(msg.chat)}`);
+              } else {
+                console.warn("[reporte] error:", reporte.error);
+                await llamarTelegram("sendMessage", {
+                  chat_id: msg.chat.id,
+                  text: "No pude generar el reporte. Intenta de nuevo.",
+                });
+              }
+            } else {
+              const ia = await responderConIA(msg.chat.id);
+              if (ia.ok) {
+                await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: ia.mensaje.texto });
+                console.log(`[ia] @${infoBot?.username ?? "bot"} → ${obtenerNombreChat(msg.chat)}: ${ia.mensaje.texto}`);
+              } else {
+                console.warn("[ia] no se pudo responder:", ia.error);
+              }
+            }
           }
         }
       } else {
@@ -448,6 +482,141 @@ async function analizarImagen(chatId, buffer, mime, pregunta) {
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
+}
+
+// ── 5e. Reportes en PDF ──────────────────────────────────────────────────────
+// Genera el contenido del reporte con la IA (una sola llamada, sin límite de 3 oraciones).
+async function generarContenidoReporte(tema) {
+  if (!IA_API_KEY) return { ok: false, error: "IA_API_KEY no configurada." };
+  try {
+    const res = await fetch(IA_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${IA_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: IA_MODELO,
+        messages: [{ role: "system", content: PROMPT_REPORTE }, { role: "user", content: tema }],
+        max_tokens: 600,
+      }),
+    });
+    const datos = await res.json();
+    if (!res.ok) return { ok: false, error: JSON.stringify(datos).slice(0, 300) };
+    const contiene = datos?.choices?.[0]?.message?.content;
+    if (!contiene) return { ok: false, error: "La IA no devolvió contenido." };
+    return { ok: true, texto: contiene.trim() };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// Convierte el texto con secciones "## Título" en un arreglo de {titulo, cuerpo}.
+function parsearSecciones(texto) {
+  const secciones = [];
+  let actual = null;
+  for (const linea of texto.split(/\r?\n/)) {
+    const encabezado = linea.match(/^##\s*(.+)/);
+    if (encabezado) {
+      if (actual) secciones.push(actual);
+      actual = { titulo: encabezado[1].trim(), cuerpo: [] };
+    } else if (actual) {
+      const limpia = linea.trim();
+      if (limpia) actual.cuerpo.push(limpia);
+    }
+  }
+  if (actual) secciones.push(actual);
+  return secciones.map((s) => ({ titulo: s.titulo, cuerpo: s.cuerpo.join(" ") }));
+}
+
+// Crea el PDF en memoria con pdfkit.
+async function crearPDF(titulo, secciones) {
+  const PDFDocument = (await import("pdfkit")).default;
+  return new Promise((resolver, rechazar) => {
+    const doc = new PDFDocument({ size: "letter", margins: { top: 60, bottom: 60, left: 60, right: 60 } });
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolver(Buffer.concat(chunks)));
+    doc.on("error", rechazar);
+
+    const hoy = new Date().toLocaleDateString("es-MX", { year: "numeric", month: "long", day: "numeric" });
+
+    doc.fontSize(18).fillColor("#1e293b").text(titulo, { align: "center" });
+    doc.moveDown(0.3);
+    doc.fontSize(10).fillColor("#64748b").text(`Fecha: ${hoy}`, { align: "center" });
+    doc.moveDown(1);
+
+    for (const sec of secciones) {
+      doc.fontSize(13).fillColor("#0f766e").text(sec.titulo);
+      doc.moveDown(0.3);
+      doc.fontSize(11).fillColor("#0f172a").text(sec.cuerpo, { lineGap: 3 });
+      doc.moveDown(0.8);
+    }
+
+    doc.end();
+  });
+}
+
+// Flujo completo: genera el reporte y lo envía a Telegram como documento PDF.
+async function enviarReportePDF(chatId, tema) {
+  const contenido = await generarContenidoReporte(tema);
+  if (!contenido.ok) return contenido;
+
+  const secciones = parsearSecciones(contenido.texto);
+  if (!secciones.length) return { ok: false, error: "La IA no generó secciones válidas." };
+
+  let pdf;
+  try {
+    pdf = await crearPDF(tema, secciones);
+  } catch (e) {
+    return { ok: false, error: `No se pudo crear el PDF: ${String(e?.message || e)}` };
+  }
+
+  try {
+    // Telegram espera un multipart/form-data con el archivo (sendDocument)
+    const fd = new FormData();
+    fd.append("chat_id", String(chatId));
+    fd.append("document", new Blob([pdf], { type: "application/pdf" }), "reporte.pdf");
+    fd.append("caption", `📄 Reporte: ${tema}`);
+    const res = await fetch(`${API}/sendDocument`, { method: "POST", body: fd });
+    const datos = await res.json();
+    if (!datos.ok) return { ok: false, error: JSON.stringify(datos).slice(0, 300) };
+
+    const enviado = agregarMensaje({
+      chat_id: chatId,
+      chat_nombre: `Chat ${chatId}`,
+      de: infoBot ? `@${infoBot.username}` : "Bot",
+      texto: `📄 Reporte PDF enviado: ${tema}`,
+      dir: "enviado",
+      tipo: "reporte",
+    });
+    return { ok: true, mensaje: enviado };
+  } catch (e) {
+    return { ok: false, error: `No se pudo enviar el PDF: ${String(e?.message || e)}` };
+  }
+}
+
+// ── 5f. Detección de petición de reporte ────────────────────────────────────
+// Reconoce "/reporte <tema>" o frases con la palabra "reporte" y extrae el tema.
+function obtenerTemaReporte(texto) {
+  if (!texto) return null;
+  const limpio = texto.trim();
+
+  // Comando explícito: /reporte <tema>
+  if (limpio.startsWith("/reporte")) {
+    const tema = limpio.replace(/^\/reporte\s*/i, "").trim();
+    return tema || null;
+  }
+
+  // Lenguaje natural: que contenga "reporte"
+  const coincide = limpio.toLowerCase().includes("reporte");
+  if (!coincide) return null;
+
+  // Busca el tema después de "reporte sobre ..." o "reporte de ..."
+  const patron = /reporte\s+(?:sobre|de|acerca\s+de|del|para)\s+([\s\S]+)/i;
+  const coincidencia = limpio.match(patron);
+  if (coincidencia && coincidencia[1].trim()) return coincidencia[1].trim();
+  return null;
 }
 
 // ── 6. Servidor HTTP: página web + API ───────────────────────────────────────
