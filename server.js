@@ -44,11 +44,9 @@ const IA_VISION_MODELO = process.env.IA_VISION_MODELO || "google/gemini-2.5-flas
 // pero conservando las reglas de honestidad y temas académicos.
 const PROMPT_REPORTE = `Eres un ingeniero agrónomo y mecánico agrícola. Redacta un reporte técnico en español sobre el tema indicado.
 
-El reporte debe tener EXACTAMENTE estas 4 secciones, cada una encabezada con su título:
-## Introducción
-## Desarrollo
-## Recomendaciones
-## Conclusión
+El reporte debe tener EXACTAMENTE 4 secciones. Cada sección va encabezada con "## " seguido de un TÍTULO PROPIO y contextual al tema del reporte (no uses títulos genéricos como "Introducción", "Desarrollo", etc.): inventa títulos que reflejen el contenido, por ejemplo para un reporte sobre plagas: "## Identificación de la plaga", "## Métodos de control", "## Manejo integrado y prevención".
+
+El orden lógico del reporte debe ser: 1) contexto o planteamiento del tema, 2) desarrollo técnico a fondo, 3) recomendaciones prácticas, 4) conclusión. Pero cada sección con su propio título contextual.
 
 Reglas:
 - Solo temas académicos y técnicos (agronomía, ingeniería agrícola, ciencias, tecnología, programación).
@@ -549,7 +547,7 @@ async function crearPDF(titulo, secciones) {
     for (const sec of secciones) {
       doc.fontSize(13).fillColor("#0f766e").text(sec.titulo);
       doc.moveDown(0.3);
-      doc.fontSize(11).fillColor("#0f172a").text(sec.cuerpo, { lineGap: 3 });
+      doc.fontSize(11).fillColor("#0f172a").text(sec.cuerpo, { lineGap: 3, align: "justify" });
       doc.moveDown(0.8);
     }
 
