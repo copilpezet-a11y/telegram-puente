@@ -36,6 +36,8 @@ const IA_MODELO = process.env.IA_MODELO || "meta-llama/llama-3.3-70b-instruct";
 const IA_URL = "https://openrouter.ai/api/v1/chat/completions";
 const STT_MODELO = process.env.IA_STT_MODELO || "openai/whisper-large-v3-turbo";
 const STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
+// Modelo de visión (imágenes): el modelo principal de chat no ve imágenes, por eso se usa uno aparte.
+const IA_VISION_MODELO = process.env.IA_VISION_MODELO || "google/gemini-2.5-flash";
 
 const PROMPT_SISTEMA = `Eres un asistente experto en problemas técnicos agronómicos y temas académicos relacionados: agronomía, ingeniería mecánica agrícola, ciencias, tecnología, programación, servidores, agentes de IA y matemáticas.
 
@@ -148,6 +150,8 @@ async function iniciarPolling() {
           // ── Nota de voz / audio: descargar + transcribir ──
           let textoFinal = texto;
           let esVoz = false;
+          let esImagen = false;
+          let imagenDescargada = null;
           const archivoAudio = msg.voice || msg.audio || msg.video_note;
           if (archivoAudio?.file_id) {
             esVoz = true;
@@ -175,19 +179,52 @@ async function iniciarPolling() {
             console.log(`[stt] 🎤 ${obtenerNombreChat(msg.chat)}: ${textoFinal}`);
           }
 
+          // ── Imagen: descargar la de mayor resolución para analizarla ──
+          const foto = msg.photo?.length ? msg.photo[msg.photo.length - 1] : null;
+          const docImagen = msg.document?.mime_type?.startsWith("image/") ? msg.document : null;
+          const archivoImg = foto || docImagen;
+          if (archivoImg?.file_id) {
+            esImagen = true;
+            await llamarTelegram("sendChatAction", { chat_id: msg.chat.id, action: "upload_photo" });
+            const descarga = await descargarImagenTelegram(archivoImg.file_id);
+            if (!descarga.ok) {
+              console.warn("[img] no se pudo descargar:", descarga.error);
+              await llamarTelegram("sendMessage", {
+                chat_id: msg.chat.id,
+                text: "No pude descargar la imagen. Intenta de nuevo.",
+              });
+              continue;
+            }
+            imagenDescargada = descarga;
+            console.log(`[img] 🖼️ ${obtenerNombreChat(msg.chat)} descargó una imagen (${descarga.mime})`);
+          }
+
           agregarMensaje({
             chat_id: msg.chat.id,
             chat_nombre: obtenerNombreChat(msg.chat),
             de: nombreDeContacto(msg.from),
-            texto: esVoz ? `🎤 ${textoFinal}` : textoFinal,
+            texto: esImagen ? `🖼️ ${textoFinal || "[imagen]"}` : esVoz ? `🎤 ${textoFinal}` : textoFinal,
             dir: "recibido",
             update_id: actualizacion.update_id,
-            tipo: esVoz ? "voz" : "texto",
+            tipo: esImagen ? "imagen" : esVoz ? "voz" : "texto",
           });
-          console.log(`[tel] ${obtenerNombreChat(msg.chat)}: ${textoFinal}`);
+          console.log(`[tel] ${obtenerNombreChat(msg.chat)}: ${esImagen ? "🖼️ " + (textoFinal || "[imagen]") : textoFinal}`);
 
-          // Auto-respuesta con IA (salvo comandos internos)
-          if (textoFinal && !textoFinal.startsWith("/start")) {
+          // ── Respuesta automática ──
+          // Si es imagen, la analiza el modelo de visión; si es texto/voz, el modelo de chat.
+          if (esImagen && imagenDescargada) {
+            const analisis = await analizarImagen(msg.chat.id, imagenDescargada.buffer, imagenDescargada.mime, textoFinal);
+            if (analisis.ok) {
+              await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: analisis.mensaje.texto });
+              console.log(`[visión] @${infoBot?.username ?? "bot"} → ${obtenerNombreChat(msg.chat)}: ${analisis.mensaje.texto}`);
+            } else {
+              console.warn("[visión] no se pudo analizar:", analisis.error);
+              await llamarTelegram("sendMessage", {
+                chat_id: msg.chat.id,
+                text: "No pude analizar la imagen. Intenta de nuevo.",
+              });
+            }
+          } else if (textoFinal && !textoFinal.startsWith("/start")) {
             const ia = await responderConIA(msg.chat.id);
             if (ia.ok) {
               await llamarTelegram("sendMessage", { chat_id: msg.chat.id, text: ia.mensaje.texto });
@@ -351,6 +388,63 @@ async function transcribirAudio(buffer, formato) {
     const texto = (datos.text || datos.texto || "").trim();
     if (!texto) return { ok: false, error: "La transcripción quedó vacía." };
     return { ok: true, texto };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// ── 5d. Imágenes: descargar de Telegram y analizar con un modelo de visión ───
+async function descargarImagenTelegram(fileId) {
+  const meta = await llamarTelegram("getFile", { file_id: fileId });
+  if (!meta.ok || !meta.result?.file_path) {
+    return { ok: false, error: `getFile falló: ${JSON.stringify(meta).slice(0, 200)}` };
+  }
+  const archivoPath = meta.result.file_path;
+  const mime = meta.result.mime_type || "image/jpeg";
+  try {
+    const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${archivoPath}`);
+    if (!res.ok) return { ok: false, error: `Descarga falló: HTTP ${res.status}` };
+    const buffer = new Uint8Array(await res.arrayBuffer());
+    if (buffer.length === 0) return { ok: false, error: "La imagen descargada está vacía." };
+    return { ok: true, buffer, mime };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// Analiza una imagen con el modelo de visión y guarda la respuesta en el historial.
+async function analizarImagen(chatId, buffer, mime, pregunta) {
+  if (!IA_API_KEY) return { ok: false, error: "IA_API_KEY no configurada." };
+  const dataUri = `data:${mime || "image/jpeg"};base64,${base64DeBytes(buffer)}`;
+  const contenido = [{ type: "image_url", image_url: { url: dataUri } }];
+  if (pregunta) contenido.push({ type: "text", text: pregunta });
+  try {
+    const res = await fetch(IA_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${IA_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: IA_VISION_MODELO,
+        messages: [{ role: "system", content: PROMPT_SISTEMA }, { role: "user", content: contenido }],
+        max_tokens: 200,
+      }),
+    });
+    const datos = await res.json();
+    if (!res.ok) return { ok: false, error: JSON.stringify(datos).slice(0, 300) };
+    const contiene = datos?.choices?.[0]?.message?.content;
+    if (!contiene) return { ok: false, error: "El modelo de visión no devolvió contenido." };
+    const texto = limitarA3Oraciones(contiene);
+    const enviado = agregarMensaje({
+      chat_id: chatId,
+      chat_nombre: `Chat ${chatId}`,
+      de: infoBot ? `@${infoBot.username}` : "Bot",
+      texto,
+      dir: "enviado",
+      modelo: IA_VISION_MODELO,
+    });
+    return { ok: true, mensaje: enviado };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
